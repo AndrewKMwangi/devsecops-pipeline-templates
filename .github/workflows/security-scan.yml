@@ -1,0 +1,47 @@
+
+name: Reusable Security Scan
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Directory to scan
+        required: false
+        type: string
+        default: "."
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    name: Scan for Exposed Secrets
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout application source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan for secrets with Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  filesystem-scan:
+    name: Scan Filesystem for Vulnerabilities
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout application source
+        uses: actions/checkout@v4
+
+      - name: Scan filesystem with Trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: ${{ inputs.working-directory }}
+          format: table
+          exit-code: "1"
+          severity: HIGH,CRITICAL
