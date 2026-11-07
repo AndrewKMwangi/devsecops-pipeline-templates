@@ -1,0 +1,44 @@
+
+name: Reusable Java CI
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        description: Java version used to build the application
+        required: false
+        type: string
+        default: "21"
+
+      working-directory:
+        description: Directory containing the Maven project
+        required: false
+        type: string
+        default: "."
+
+permissions:
+  contents: read
+
+jobs:
+  java-build:
+    name: Build and Test Java Application
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+
+    steps:
+      - name: Checkout application source
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+          cache: maven
+          cache-dependency-path: ${{ inputs.working-directory }}/pom.xml
+
+      - name: Build and run tests
+        run: mvn --batch-mode clean verify
