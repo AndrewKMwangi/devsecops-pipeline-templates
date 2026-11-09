@@ -1,0 +1,244 @@
+﻿name: Reusable Pipeline Orchestrator
+
+on:
+  workflow_call:
+    inputs:
+      app-stack:
+        description: Application technology stack
+        required: true
+        type: string
+
+      working-directory:
+        description: Directory containing the application source
+        required: false
+        type: string
+        default: "."
+
+      java-version:
+        description: Java version used for Java applications
+        required: false
+        type: string
+        default: "21"
+
+      node-version:
+        description: Node.js version used for Node.js applications
+        required: false
+        type: string
+        default: "22"
+
+      signing-identity:
+        description: Expected GitHub Actions identity used for Cosign signing
+        required: true
+        type: string
+
+      signing-oidc-issuer:
+        description: Expected OIDC issuer for the signing identity
+        required: false
+        type: string
+        default: https://token.actions.githubusercontent.com
+
+      image-name:
+        description: Name of the container image
+        required: true
+        type: string
+
+      dockerfile:
+        description: Path to the Dockerfile
+        required: false
+        type: string
+        default: "Dockerfile"
+
+      build-context:
+        description: Docker build context directory
+        required: false
+        type: string
+        default: "."
+
+      image-tag:
+        description: Container image tag
+        required: false
+        type: string
+        default: "latest"
+
+      gitops-owner:
+        description: GitHub account or organization owning the GitOps repository
+        required: true
+        type: string
+
+      gitops-repository:
+        description: Name of the GitOps repository
+        required: true
+        type: string
+
+      target-branch:
+        description: GitOps branch to update
+        required: false
+        type: string
+        default: "main"
+
+      values-file:
+        description: Helm values file path in the GitOps repository
+        required: true
+        type: string
+
+    secrets:
+      gitops-app-client-id:
+        required: true
+      gitops-app-private-key:
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+jobs:
+  java-build:
+    name: Java Build and Test
+    if: ${{ inputs.app-stack == 'java' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/java-ci.yml
+    with:
+      java-version: ${{ inputs.java-version }}
+      working-directory: ${{ inputs.working-directory }}
+
+  node-build:
+    name: Node.js Build
+    if: ${{ inputs.app-stack == 'node' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/node-ci.yml
+    with:
+      node-version: ${{ inputs.node-version }}
+      working-directory: ${{ inputs.working-directory }}
+
+  source-security:
+    name: Source Security Scanning
+    permissions:
+      contents: read
+    uses: ./.github/workflows/security-scan.yml
+    with:
+      working-directory: ${{ inputs.working-directory }}
+
+  pipeline-gate:
+    name: Validate Initial Pipeline Results
+    needs:
+      - java-build
+      - node-build
+      - source-security
+    if: always()
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Check pipeline results
+        shell: bash
+        env:
+          APP_STACK: ${{ inputs.app-stack }}
+          JAVA_RESULT: ${{ needs.java-build.result }}
+          NODE_RESULT: ${{ needs.node-build.result }}
+          SECURITY_RESULT: ${{ needs.source-security.result }}
+        run: |
+          if [[ "$APP_STACK" != "java" && "$APP_STACK" != "node" ]]; then
+            echo "Unsupported application stack: $APP_STACK"
+            exit 1
+          fi
+
+          if [[ "$SECURITY_RESULT" != "success" ]]; then
+            echo "Source security scanning did not succeed."
+            exit 1
+          fi
+
+          if [[ "$APP_STACK" == "java" && "$JAVA_RESULT" != "success" ]]; then
+            echo "Java build and test did not succeed."
+            exit 1
+          fi
+
+          if [[ "$APP_STACK" == "node" && "$NODE_RESULT" != "success" ]]; then
+            echo "Node.js build did not succeed."
+            exit 1
+          fi
+
+          echo "Initial pipeline milestone passed."
+
+  docker-build:
+    name: Build and Publish Container Image
+    needs:
+      - pipeline-gate
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      image-name: ${{ inputs.image-name }}
+      dockerfile: ${{ inputs.dockerfile }}
+      build-context: ${{ inputs.build-context }}
+      image-tag: ${{ inputs.image-tag }}
+
+  container-scan:
+    name: Scan Published Container Image
+    needs:
+      - docker-build
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/container-security.yml
+    with:
+      image-ref: ${{ needs.docker-build.outputs.image-digest }}
+
+  generate-sbom:
+    name: Generate Container SBOM
+    needs:
+      - docker-build
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/sbom.yml
+    with:
+      image-ref: ${{ needs.docker-build.outputs.image-digest }}
+
+  sign-image:
+    name: Sign Verified Container Image
+    needs:
+      - docker-build
+      - container-scan
+      - generate-sbom
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    uses: ./.github/workflows/image-signing.yml
+    with:
+      image-ref: ${{ needs.docker-build.outputs.image-digest }}
+
+  verify-image:
+    name: Verify Container Image Signature
+    needs:
+      - docker-build
+      - sign-image
+    permissions:
+      packages: read
+    uses: ./.github/workflows/image-verification.yml
+    with:
+      image-ref: ${{ needs.docker-build.outputs.image-digest }}
+      certificate-identity: ${{ inputs.signing-identity }}
+      certificate-oidc-issuer: ${{ inputs.signing-oidc-issuer }}
+
+  gitops-deploy:
+    name: Update GitOps Deployment
+    needs:
+      - docker-build
+      - verify-image
+    permissions:
+      contents: read
+    uses: ./.github/workflows/gitops-deploy.yml
+    with:
+      gitops-owner: ${{ inputs.gitops-owner }}
+      gitops-repository: ${{ inputs.gitops-repository }}
+      target-branch: ${{ inputs.target-branch }}
+      values-file: ${{ inputs.values-file }}
+      image-ref: ${{ needs.docker-build.outputs.image-digest }}
+    secrets:
+      gitops-app-client-id: ${{ secrets.gitops-app-client-id }}
+      gitops-app-private-key: ${{ secrets.gitops-app-private-key }}
+

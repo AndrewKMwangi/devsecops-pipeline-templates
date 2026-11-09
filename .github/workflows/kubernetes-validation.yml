@@ -1,0 +1,114 @@
+name: Reusable Kubernetes Validation
+
+on:
+  workflow_call:
+    inputs:
+      chart-directory:
+        description: Directory containing the Helm chart
+        required: true
+        type: string
+
+      values-file:
+        description: Helm values file used for validation
+        required: true
+        type: string
+
+      release-name:
+        description: Helm release name used during rendering
+        required: false
+        type: string
+        default: validation-release
+
+      kubernetes-version:
+        description: Kubernetes version used for schema validation
+        required: false
+        type: string
+        default: "1.32.0"
+
+permissions:
+  contents: read
+
+jobs:
+  helm-validation:
+    name: Validate Helm Chart
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout application repository
+        uses: actions/checkout@v4
+
+      - name: Validate chart paths
+        shell: bash
+        env:
+          CHART_DIRECTORY: ${{ inputs.chart-directory }}
+          VALUES_FILE: ${{ inputs.values-file }}
+        run: |
+          if [[ "$CHART_DIRECTORY" == /* || "$CHART_DIRECTORY" == *".."* ]]; then
+            echo "Invalid chart directory."
+            exit 1
+          fi
+
+          if [[ "$VALUES_FILE" == /* || "$VALUES_FILE" == *".."* ]]; then
+            echo "Invalid values file path."
+            exit 1
+          fi
+
+          if [[ ! -f "$CHART_DIRECTORY/Chart.yaml" ]]; then
+            echo "Chart.yaml not found."
+            exit 1
+          fi
+
+          if [[ ! -f "$CHART_DIRECTORY/$VALUES_FILE" ]]; then
+            echo "Helm values file not found."
+            exit 1
+          fi
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Lint Helm chart
+        env:
+          CHART_DIRECTORY: ${{ inputs.chart-directory }}
+          VALUES_FILE: ${{ inputs.values-file }}
+        run: |
+          helm lint "$CHART_DIRECTORY" \
+            --values "$CHART_DIRECTORY/$VALUES_FILE"
+
+      - name: Render Kubernetes manifests
+        env:
+          CHART_DIRECTORY: ${{ inputs.chart-directory }}
+          VALUES_FILE: ${{ inputs.values-file }}
+          RELEASE_NAME: ${{ inputs.release-name }}
+        run: |
+          helm template "$RELEASE_NAME" "$CHART_DIRECTORY" \
+            --values "$CHART_DIRECTORY/$VALUES_FILE" \
+            --output-dir rendered-manifests
+
+      - name: Upload rendered manifests
+        uses: actions/upload-artifact@v4
+        with:
+          name: rendered-kubernetes-manifests
+          path: rendered-manifests/
+          if-no-files-found: error
+          retention-days: 7
+
+  manifest-validation:
+    name: Validate Kubernetes Manifests
+    runs-on: ubuntu-latest
+    needs: helm-validation
+
+    steps:
+      - name: Download rendered manifests
+        uses: actions/download-artifact@v4
+        with:
+          name: rendered-kubernetes-manifests
+          path: rendered-manifests
+
+      - name: Validate Kubernetes schemas
+        uses: docker://ghcr.io/yannh/kubeconform:v0.6.7
+        with:
+          args: >-
+            -strict
+            -summary
+            -kubernetes-version ${{ inputs.kubernetes-version }}
+            rendered-manifests/

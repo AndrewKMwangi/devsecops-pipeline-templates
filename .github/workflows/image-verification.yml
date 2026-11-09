@@ -1,0 +1,61 @@
+name: Reusable Container Image Verification
+
+on:
+  workflow_call:
+    inputs:
+      image-ref:
+        description: Immutable GHCR image reference using a SHA-256 digest
+        required: true
+        type: string
+
+      certificate-identity:
+        description: Expected GitHub Actions signing certificate identity
+        required: true
+        type: string
+
+      certificate-oidc-issuer:
+        description: Expected OIDC issuer for the signing identity
+        required: false
+        type: string
+        default: https://token.actions.githubusercontent.com
+
+permissions:
+  packages: read
+
+jobs:
+  verify-image:
+    name: Verify Container Image Signature
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate image reference
+        shell: bash
+        env:
+          IMAGE_REF: ${{ inputs.image-ref }}
+        run: |
+          if [[ ! "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9][a-z0-9._/-]*@sha256:[a-f0-9]{64}$ ]]; then
+            echo "Image reference must be a GHCR image pinned to a SHA-256 digest."
+            exit 1
+          fi
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v4.0.0
+
+      - name: Verify image signature
+        shell: bash
+        env:
+          IMAGE_REF: ${{ inputs.image-ref }}
+          CERTIFICATE_IDENTITY: ${{ inputs.certificate-identity }}
+          CERTIFICATE_OIDC_ISSUER: ${{ inputs.certificate-oidc-issuer }}
+        run: |
+          cosign verify \
+            --certificate-identity "$CERTIFICATE_IDENTITY" \
+            --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+            "$IMAGE_REF"
