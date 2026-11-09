@@ -1,0 +1,147 @@
+name: Reusable GitOps Deployment
+
+on:
+  workflow_call:
+    inputs:
+      gitops-owner:
+        description: GitHub account or organization owning the GitOps repository
+        required: true
+        type: string
+
+      gitops-repository:
+        description: Name of the GitOps repository
+        required: true
+        type: string
+
+      target-branch:
+        description: GitOps branch to update
+        required: false
+        type: string
+        default: main
+
+      values-file:
+        description: Path to the Helm values file inside the GitOps repository
+        required: true
+        type: string
+
+      image-ref:
+        description: Immutable GHCR image reference using a SHA-256 digest
+        required: true
+        type: string
+
+    secrets:
+      gitops-app-client-id:
+        description: GitHub App client ID
+        required: true
+
+      gitops-app-private-key:
+        description: GitHub App private key
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  update-gitops:
+    name: Update GitOps Helm Values
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate deployment inputs
+        shell: bash
+        env:
+          IMAGE_REF: ${{ inputs.image-ref }}
+          VALUES_FILE: ${{ inputs.values-file }}
+          GITOPS_OWNER: ${{ inputs.gitops-owner }}
+          GITOPS_REPOSITORY: ${{ inputs.gitops-repository }}
+          TARGET_BRANCH: ${{ inputs.target-branch }}
+        run: |
+          if [[ ! "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9][a-z0-9._/-]*@sha256:[a-f0-9]{64}$ ]]; then
+            echo "Image reference must be a GHCR image pinned to a SHA-256 digest."
+            exit 1
+          fi
+
+          if [[ "$VALUES_FILE" == /* || "$VALUES_FILE" == *".."* ]]; then
+            echo "Invalid Helm values file path."
+            exit 1
+          fi
+
+          if [[ ! "$VALUES_FILE" =~ \.ya?ml$ ]]; then
+            echo "Helm values file must have a YAML extension."
+            exit 1
+          fi
+
+          if [[ ! "$GITOPS_OWNER" =~ ^[A-Za-z0-9-]+$ ]]; then
+            echo "Invalid GitOps repository owner."
+            exit 1
+          fi
+
+          if [[ ! "$GITOPS_REPOSITORY" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "Invalid GitOps repository name."
+            exit 1
+          fi
+
+          if [[ ! "$TARGET_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "Invalid target branch."
+            exit 1
+          fi
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.gitops-app-client-id }}
+          private-key: ${{ secrets.gitops-app-private-key }}
+          owner: ${{ inputs.gitops-owner }}
+          repositories: ${{ inputs.gitops-repository }}
+          permission-contents: write
+
+      - name: Checkout GitOps repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.gitops-owner }}/${{ inputs.gitops-repository }}
+          ref: ${{ inputs.target-branch }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: gitops
+
+      - name: Extract image repository and digest
+        id: image
+        shell: bash
+        env:
+          IMAGE_REF: ${{ inputs.image-ref }}
+        run: |
+          IMAGE_REPOSITORY="${IMAGE_REF%@*}"
+          IMAGE_DIGEST="${IMAGE_REF##*@}"
+
+          echo "repository=${IMAGE_REPOSITORY}" >> "$GITHUB_OUTPUT"
+          echo "digest=${IMAGE_DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Update Helm values
+        uses: mikefarah/yq@master
+        env:
+          IMAGE_REPOSITORY: ${{ steps.image.outputs.repository }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          VALUES_FILE: gitops/${{ inputs.values-file }}
+        with:
+          cmd: |
+            yq -i '.image.repository = strenv(IMAGE_REPOSITORY) | .image.digest = strenv(IMAGE_DIGEST)' "$VALUES_FILE"
+
+      - name: Commit and push GitOps change
+        shell: bash
+        working-directory: gitops
+        env:
+          VALUES_FILE: ${{ inputs.values-file }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -- "$VALUES_FILE"
+
+          if git diff --cached --quiet; then
+            echo "No GitOps changes detected."
+            exit 0
+          fi
+
+          git commit -m "chore(gitops): update image to ${IMAGE_DIGEST}"
+          git push
