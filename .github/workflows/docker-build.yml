@@ -1,3 +1,4 @@
+
 name: Reusable Docker Build and Push
 
 on:
@@ -26,6 +27,18 @@ on:
         type: string
         default: "latest"
 
+      app-stack:
+        description: Application technology stack
+        required: false
+        type: string
+        default: "node"
+
+      working-directory:
+        description: Directory containing the application source
+        required: false
+        type: string
+        default: "."
+
     outputs:
       image:
         description: Published container image tag reference
@@ -51,6 +64,13 @@ jobs:
     steps:
       - name: Checkout application source
         uses: actions/checkout@v4
+
+      - name: Download packaged Java application
+        if: ${{ inputs.app-stack == 'java' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: java-package
+          path: ${{ inputs.working-directory }}/target
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

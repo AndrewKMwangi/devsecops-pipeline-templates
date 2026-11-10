@@ -76,10 +76,21 @@ on:
         type: string
         default: "main"
 
-      values-file:
-        description: Helm values file path in the GitOps repository
+      chart-directory:
+        description: Helm chart directory relative to the GitOps repository root
         required: true
         type: string
+
+      values-file:
+        description: Helm values file path relative to the GitOps repository root
+        required: true
+        type: string
+
+      kubernetes-version:
+        description: Kubernetes version used for manifest schema validation
+        required: false
+        type: string
+        default: "1.32.0"
 
     secrets:
       gitops-app-client-id:
@@ -121,12 +132,29 @@ jobs:
     with:
       working-directory: ${{ inputs.working-directory }}
 
+  kubernetes-validation:
+    name: Kubernetes Manifest Validation
+    permissions:
+      contents: read
+    uses: ./.github/workflows/kubernetes-validation.yml
+    with:
+      gitops-owner: ${{ inputs.gitops-owner }}
+      gitops-repository: ${{ inputs.gitops-repository }}
+      target-branch: ${{ inputs.target-branch }}
+      chart-directory: ${{ inputs.chart-directory }}
+      values-file: ${{ inputs.values-file }}
+      kubernetes-version: ${{ inputs.kubernetes-version }}
+    secrets:
+      gitops-app-client-id: ${{ secrets.gitops-app-client-id }}
+      gitops-app-private-key: ${{ secrets.gitops-app-private-key }}
+
   pipeline-gate:
     name: Validate Initial Pipeline Results
     needs:
       - java-build
       - node-build
       - source-security
+      - kubernetes-validation
     if: always()
     runs-on: ubuntu-latest
     permissions: {}
@@ -138,6 +166,7 @@ jobs:
           JAVA_RESULT: ${{ needs.java-build.result }}
           NODE_RESULT: ${{ needs.node-build.result }}
           SECURITY_RESULT: ${{ needs.source-security.result }}
+          KUBERNETES_RESULT: ${{ needs.kubernetes-validation.result }}
         run: |
           if [[ "$APP_STACK" != "java" && "$APP_STACK" != "node" ]]; then
             echo "Unsupported application stack: $APP_STACK"
@@ -146,6 +175,11 @@ jobs:
 
           if [[ "$SECURITY_RESULT" != "success" ]]; then
             echo "Source security scanning did not succeed."
+            exit 1
+          fi
+
+          if [[ "$KUBERNETES_RESULT" != "success" ]]; then
+            echo "Kubernetes manifest validation did not succeed."
             exit 1
           fi
 
@@ -174,6 +208,8 @@ jobs:
       dockerfile: ${{ inputs.dockerfile }}
       build-context: ${{ inputs.build-context }}
       image-tag: ${{ inputs.image-tag }}
+      app-stack: ${{ inputs.app-stack }}
+      working-directory: ${{ inputs.working-directory }}
 
   container-scan:
     name: Scan Published Container Image
@@ -241,4 +277,3 @@ jobs:
     secrets:
       gitops-app-client-id: ${{ secrets.gitops-app-client-id }}
       gitops-app-private-key: ${{ secrets.gitops-app-private-key }}
-

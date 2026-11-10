@@ -1,15 +1,32 @@
+
 name: Reusable Kubernetes Validation
 
 on:
   workflow_call:
     inputs:
+      gitops-owner:
+        description: GitHub account or organization owning the GitOps repository
+        required: true
+        type: string
+
+      gitops-repository:
+        description: GitOps repository name
+        required: true
+        type: string
+
+      target-branch:
+        description: GitOps branch containing the Helm chart
+        required: false
+        type: string
+        default: main
+
       chart-directory:
-        description: Directory containing the Helm chart
+        description: Chart directory relative to the GitOps repository root
         required: true
         type: string
 
       values-file:
-        description: Helm values file used for validation
+        description: Values file path relative to the GitOps repository root
         required: true
         type: string
 
@@ -25,20 +42,42 @@ on:
         type: string
         default: "1.32.0"
 
+    secrets:
+      gitops-app-client-id:
+        required: true
+      gitops-app-private-key:
+        required: true
+
 permissions:
   contents: read
 
 jobs:
   helm-validation:
-    name: Validate Helm Chart
+    name: Validate GitOps Helm Chart
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout application repository
+      - name: Generate read-only GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.gitops-app-client-id }}
+          private-key: ${{ secrets.gitops-app-private-key }}
+          owner: ${{ inputs.gitops-owner }}
+          repositories: ${{ inputs.gitops-repository }}
+          permission-contents: read
+
+      - name: Checkout GitOps repository
         uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.gitops-owner }}/${{ inputs.gitops-repository }}
+          ref: ${{ inputs.target-branch }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: gitops
 
       - name: Validate chart paths
         shell: bash
+        working-directory: gitops
         env:
           CHART_DIRECTORY: ${{ inputs.chart-directory }}
           VALUES_FILE: ${{ inputs.values-file }}
@@ -58,37 +97,41 @@ jobs:
             exit 1
           fi
 
-          if [[ ! -f "$CHART_DIRECTORY/$VALUES_FILE" ]]; then
+          if [[ ! -f "$VALUES_FILE" ]]; then
             echo "Helm values file not found."
             exit 1
           fi
 
       - name: Set up Helm
         uses: azure/setup-helm@v4
+        with:
+          version: v3.17.3
 
       - name: Lint Helm chart
+        working-directory: gitops
         env:
           CHART_DIRECTORY: ${{ inputs.chart-directory }}
           VALUES_FILE: ${{ inputs.values-file }}
         run: |
           helm lint "$CHART_DIRECTORY" \
-            --values "$CHART_DIRECTORY/$VALUES_FILE"
+            --values "$VALUES_FILE"
 
       - name: Render Kubernetes manifests
+        working-directory: gitops
         env:
           CHART_DIRECTORY: ${{ inputs.chart-directory }}
           VALUES_FILE: ${{ inputs.values-file }}
           RELEASE_NAME: ${{ inputs.release-name }}
         run: |
           helm template "$RELEASE_NAME" "$CHART_DIRECTORY" \
-            --values "$CHART_DIRECTORY/$VALUES_FILE" \
-            --output-dir rendered-manifests
+            --values "$VALUES_FILE" \
+            --output-dir "$RUNNER_TEMP/rendered-manifests"
 
       - name: Upload rendered manifests
         uses: actions/upload-artifact@v4
         with:
           name: rendered-kubernetes-manifests
-          path: rendered-manifests/
+          path: ${{ runner.temp }}/rendered-manifests/
           if-no-files-found: error
           retention-days: 7
 
@@ -111,4 +154,6 @@ jobs:
             -strict
             -summary
             -kubernetes-version ${{ inputs.kubernetes-version }}
+            -schema-location default
+            -schema-location https://raw.githubusercontent.com/CustomResourceDefinition/catalog/main/schema/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
             rendered-manifests/
