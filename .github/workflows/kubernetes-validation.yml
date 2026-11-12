@@ -57,6 +57,47 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Diagnose GitHub App private-key format
+        shell: bash
+        env:
+          APP_PRIVATE_KEY: ${{ secrets.gitops-app-private-key }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$APP_PRIVATE_KEY" ]]; then
+            echo "Diagnostic: GitHub App private-key secret is empty or unavailable."
+            exit 1
+          fi
+
+          key_file="$(mktemp)"
+          trap 'rm -f "$key_file"' EXIT
+          chmod 600 "$key_file"
+          printf '%s' "$APP_PRIVATE_KEY" > "$key_file"
+
+          key_bytes="$(wc -c < "$key_file" | tr -d ' ')"
+          first_line="$(head -n 1 "$key_file")"
+          last_line="$(tail -n 1 "$key_file")"
+
+          echo "Diagnostic: private-key secret is present."
+          echo "Diagnostic: private-key size is ${key_bytes} bytes."
+
+          if [[ "$first_line" != "-----BEGIN "* "-----" ]]; then
+            echo "Diagnostic: PEM BEGIN marker is missing or malformed."
+            exit 1
+          fi
+
+          if [[ "$last_line" != "-----END "* "-----" ]]; then
+            echo "Diagnostic: PEM END marker is missing or malformed."
+            exit 1
+          fi
+
+          if openssl pkey -in "$key_file" -noout >/dev/null 2>&1; then
+            echo "Diagnostic: OpenSSL successfully parsed the private key."
+          else
+            echo "Diagnostic: OpenSSL could not parse the private key."
+            exit 1
+          fi
+
       - name: Generate read-only GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v3
