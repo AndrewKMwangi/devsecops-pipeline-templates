@@ -81,12 +81,12 @@ jobs:
           echo "Diagnostic: private-key secret is present."
           echo "Diagnostic: private-key size is ${key_bytes} bytes."
 
-          if [[ "$first_line" != "-----BEGIN "* "-----" ]]; then
+          if [[ "$first_line" != "-----BEGIN "* ]]; then
             echo "Diagnostic: PEM BEGIN marker is missing or malformed."
             exit 1
           fi
 
-          if [[ "$last_line" != "-----END "* "-----" ]]; then
+          if [[ "$last_line" != "-----END "* ]]; then
             echo "Diagnostic: PEM END marker is missing or malformed."
             exit 1
           fi
