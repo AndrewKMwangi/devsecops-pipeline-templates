@@ -57,12 +57,28 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Diagnose GitHub App private-key format
+      - name: Diagnose GitHub App credentials
         shell: bash
         env:
+          APP_CLIENT_ID: ${{ secrets.gitops-app-client-id }}
           APP_PRIVATE_KEY: ${{ secrets.gitops-app-private-key }}
         run: |
           set -euo pipefail
+
+          if [[ -z "$APP_CLIENT_ID" ]]; then
+            echo "Diagnostic: GitHub App client-ID secret is empty or unavailable."
+            exit 1
+          fi
+
+          client_id_length="${#APP_CLIENT_ID}"
+          echo "Diagnostic: GitHub App client-ID secret is present."
+          echo "Diagnostic: client-ID length is ${client_id_length} characters."
+
+          if [[ "$APP_CLIENT_ID" == Iv1.* ]]; then
+            echo "Diagnostic: client-ID has the expected GitHub App client-ID prefix."
+          else
+            echo "Diagnostic: client-ID does not have the usual GitHub App client-ID prefix."
+          fi
 
           if [[ -z "$APP_PRIVATE_KEY" ]]; then
             echo "Diagnostic: GitHub App private-key secret is empty or unavailable."
